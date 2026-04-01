@@ -1,16 +1,13 @@
-import React, { useState } from "react";
 import React, { useEffect, useMemo, useState } from "react";
 
 const STORAGE_KEY = "spc-xbar-r-data-v1";
 
 function avg(arr) {
-  return arr.reduce((a, b) => a + b, 0) / arr.length;
   return arr.reduce((sum, n) => sum + n, 0) / arr.length;
 }
 
-function range(arr) {
 function calcRange(arr) {
-return Math.max(...arr) - Math.min(...arr);
+  return Math.max(...arr) - Math.min(...arr);
 }
 
 function toFixedNum(value, digits = 2) {
@@ -21,6 +18,18 @@ function getYPosition(value, min, max, height) {
   if (max === min) return height / 2;
   const ratio = (value - min) / (max - min);
   return height - ratio * height;
+}
+
+function formatDateTime() {
+  return new Date().toLocaleString("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
 }
 
 function SimpleLineChart({
@@ -38,12 +47,9 @@ function SimpleLineChart({
   const padding = 40;
 
   const values = data.map((d) => d[valueKey]);
-  const allValues = [
-    ...values,
-    Number(ucl),
-    Number(cl),
-    Number(lcl),
-  ].filter((v) => Number.isFinite(v));
+  const allValues = [...values, Number(ucl), Number(cl), Number(lcl)].filter(
+    (v) => Number.isFinite(v)
+  );
 
   const minVal = Math.min(...allValues, 0);
   const maxVal = Math.max(...allValues, 1);
@@ -56,9 +62,7 @@ function SimpleLineChart({
       data.length === 1
         ? padding + innerWidth / 2
         : padding + (i * innerWidth) / (data.length - 1);
-    const y =
-      padding +
-      getYPosition(d[valueKey], minVal, maxVal, innerHeight);
+    const y = padding + getYPosition(d[valueKey], minVal, maxVal, innerHeight);
     return { x, y, value: d[valueKey], label: labels[i] };
   });
 
@@ -126,13 +130,13 @@ function SimpleLineChart({
           strokeWidth="2"
         />
 
-        <text x={width - 70} y={lineY(ucl) - 6} fontSize="12" fill="#dc2626">
+        <text x={width - 120} y={lineY(ucl) - 6} fontSize="12" fill="#dc2626">
           UCL {ucl}
         </text>
-        <text x={width - 70} y={lineY(cl) - 6} fontSize="12" fill="#16a34a">
+        <text x={width - 120} y={lineY(cl) - 6} fontSize="12" fill="#16a34a">
           CL {cl}
         </text>
-        <text x={width - 70} y={lineY(lcl) - 6} fontSize="12" fill="#dc2626">
+        <text x={width - 120} y={lineY(lcl) - 6} fontSize="12" fill="#dc2626">
           LCL {lcl}
         </text>
 
@@ -174,8 +178,7 @@ function SimpleLineChart({
 }
 
 export default function App() {
-const [inputs, setInputs] = useState(["", "", "", "", ""]);
-  const [data, setData] = useState([]);
+  const [inputs, setInputs] = useState(["", "", "", "", ""]);
   const [groups, setGroups] = useState([]);
 
   const [xbarUCL, setXbarUCL] = useState("1.50");
@@ -190,10 +193,6 @@ const [inputs, setInputs] = useState(["", "", "", "", ""]);
     const saved = localStorage.getItem(STORAGE_KEY);
     if (!saved) return;
 
-  const handleChange = (i, val) => {
-    const newInputs = [...inputs];
-    newInputs[i] = val;
-    setInputs(newInputs);
     try {
       const parsed = JSON.parse(saved);
       setInputs(parsed.inputs || ["", "", "", "", ""]);
@@ -233,6 +232,7 @@ const [inputs, setInputs] = useState(["", "", "", "", ""]);
       return {
         id: index + 1,
         name: `第${index + 1}组`,
+        time: group.time || "",
         values: group.values,
         xbar,
         r,
@@ -248,25 +248,26 @@ const [inputs, setInputs] = useState(["", "", "", "", ""]);
     const next = [...inputs];
     next[index] = value;
     setInputs(next);
-};
+  };
 
-  const addData = () => {
-    const nums = inputs.map(Number);
-    if (nums.some(isNaN)) {
-      alert("请输入5个数字");
   const addGroup = () => {
     const nums = inputs.map((v) => Number(v));
     const isValid = nums.length === 5 && nums.every((n) => !Number.isNaN(n));
 
     if (!isValid) {
       alert("请输入 5 个有效数字");
-return;
-}
-    setData([...data, nums]);
+      return;
+    }
 
-    setGroups((prev) => [...prev, { values: nums }]);
-setInputs(["", "", "", "", ""]);
-};
+    setGroups((prev) => [
+      ...prev,
+      {
+        values: nums,
+        time: formatDateTime(),
+      },
+    ]);
+    setInputs(["", "", "", "", ""]);
+  };
 
   const deleteLastGroup = () => {
     if (groups.length === 0) return;
@@ -280,30 +281,11 @@ setInputs(["", "", "", "", ""]);
     localStorage.removeItem(STORAGE_KEY);
   };
 
-return (
-    <div style={{ padding: 20 }}>
-      <h1>SPC Xbar-R 质量监控</h1>
-
-      <div style={{ marginTop: 20 }}>
-        {inputs.map((v, i) => (
-          <input
-            key={i}
-            value={v}
-            onChange={(e) => handleChange(i, e.target.value)}
-            placeholder={`值${i + 1}`}
-            style={{ marginRight: 5 }}
-          />
-        ))}
-        <button onClick={addData}>添加数据</button>
-      </div>
+  return (
     <div style={styles.page}>
       <div style={styles.container}>
         <h1 style={styles.title}>SPC Xbar-R 质量监控</h1>
 
-      <div style={{ marginTop: 20 }}>
-        {data.map((d, i) => (
-          <div key={i}>
-            第{i + 1}组：平均={avg(d).toFixed(2)}，极差={range(d).toFixed(2)}
         <div style={styles.card}>
           <h3 style={styles.cardTitle}>输入 5 个测量值</h3>
           <div style={styles.inputRow}>
@@ -316,8 +298,7 @@ return (
                 style={styles.input}
               />
             ))}
-</div>
-        ))}
+          </div>
 
           <div style={styles.buttonRow}>
             <button onClick={addGroup} style={styles.primaryButton}>
@@ -394,7 +375,7 @@ return (
           title="Xbar 图"
           data={processedData}
           valueKey="xbar"
-          labels={processedData.map((d) => d.name)}
+          labels={processedData.map((d) => d.time || d.name)}
           ucl={xbarUCL}
           cl={xbarCL}
           lcl={xbarLCL}
@@ -405,7 +386,7 @@ return (
           title="R 图"
           data={processedData}
           valueKey="r"
-          labels={processedData.map((d) => d.name)}
+          labels={processedData.map((d) => d.time || d.name)}
           ucl={rUCL}
           cl={rCL}
           lcl={rLCL}
@@ -419,6 +400,7 @@ return (
               <thead>
                 <tr>
                   <th style={styles.th}>组别</th>
+                  <th style={styles.th}>记录时间</th>
                   <th style={styles.th}>5个测量值</th>
                   <th style={styles.th}>平均值 Xbar</th>
                   <th style={styles.th}>极差 R</th>
@@ -429,7 +411,7 @@ return (
               <tbody>
                 {processedData.length === 0 ? (
                   <tr>
-                    <td style={styles.td} colSpan="6">
+                    <td style={styles.td} colSpan="7">
                       暂无数据
                     </td>
                   </tr>
@@ -437,6 +419,7 @@ return (
                   processedData.map((row) => (
                     <tr key={row.id}>
                       <td style={styles.td}>{row.name}</td>
+                      <td style={styles.td}>{row.time || "-"}</td>
                       <td style={styles.td}>
                         {row.values.map((v) => toFixedNum(v)).join(" / ")}
                       </td>
@@ -445,7 +428,8 @@ return (
                       <td
                         style={{
                           ...styles.td,
-                          color: row.xbarStatus === "超限" ? "#dc2626" : "#16a34a",
+                          color:
+                            row.xbarStatus === "超限" ? "#dc2626" : "#16a34a",
                           fontWeight: 600,
                         }}
                       >
@@ -454,7 +438,8 @@ return (
                       <td
                         style={{
                           ...styles.td,
-                          color: row.rStatus === "超限" ? "#dc2626" : "#16a34a",
+                          color:
+                            row.rStatus === "超限" ? "#dc2626" : "#16a34a",
                           fontWeight: 600,
                         }}
                       >
@@ -467,9 +452,9 @@ return (
             </table>
           </div>
         </div>
-</div>
-</div>
-);
+      </div>
+    </div>
+  );
 }
 
 const styles = {
@@ -568,9 +553,11 @@ const styles = {
     padding: "12px",
     borderBottom: "1px solid #e5e7eb",
     background: "#f9fafb",
+    whiteSpace: "nowrap",
   },
   td: {
     padding: "12px",
     borderBottom: "1px solid #e5e7eb",
+    whiteSpace: "nowrap",
   },
 };
