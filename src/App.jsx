@@ -32,6 +32,59 @@ function formatDateTime() {
   });
 }
 
+function downloadCSV(rows) {
+  const header = [
+    "组别",
+    "记录时间",
+    "测量值1",
+    "测量值2",
+    "测量值3",
+    "测量值4",
+    "测量值5",
+    "平均值Xbar",
+    "极差R",
+    "Xbar判定",
+    "R判定",
+  ];
+
+  const csvRows = rows.map((row) => [
+    row.name,
+    row.time || "",
+    row.values[0],
+    row.values[1],
+    row.values[2],
+    row.values[3],
+    row.values[4],
+    toFixedNum(row.xbar),
+    toFixedNum(row.r),
+    row.xbarStatus,
+    row.rStatus,
+  ]);
+
+  const csvContent = [header, ...csvRows]
+    .map((line) =>
+      line
+        .map((cell) => `"${String(cell ?? "").replace(/"/g, '""')}"`)
+        .join(",")
+    )
+    .join("\n");
+
+  const blob = new Blob(["\uFEFF" + csvContent], {
+    type: "text/csv;charset=utf-8;",
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `spc_data_${new Date()
+    .toISOString()
+    .slice(0, 19)
+    .replace(/[:T]/g, "-")}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
 function SimpleLineChart({
   title,
   data,
@@ -189,6 +242,8 @@ export default function App() {
   const [rCL, setRCL] = useState("0.50");
   const [rLCL, setRLCL] = useState("0.00");
 
+  const [alarmMessage, setAlarmMessage] = useState("");
+
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (!saved) return;
@@ -203,6 +258,7 @@ export default function App() {
       setRUCL(parsed.rUCL || "1.00");
       setRCL(parsed.rCL || "0.50");
       setRLCL(parsed.rLCL || "0.00");
+      setAlarmMessage(parsed.alarmMessage || "");
     } catch (e) {
       console.error("读取本地数据失败", e);
     }
@@ -220,9 +276,20 @@ export default function App() {
         rUCL,
         rCL,
         rLCL,
+        alarmMessage,
       })
     );
-  }, [inputs, groups, xbarUCL, xbarCL, xbarLCL, rUCL, rCL, rLCL]);
+  }, [
+    inputs,
+    groups,
+    xbarUCL,
+    xbarCL,
+    xbarLCL,
+    rUCL,
+    rCL,
+    rLCL,
+    alarmMessage,
+  ]);
 
   const processedData = useMemo(() => {
     return groups.map((group, index) => {
@@ -244,6 +311,13 @@ export default function App() {
     });
   }, [groups, xbarUCL, xbarLCL, rUCL, rLCL]);
 
+  const latestRow =
+    processedData.length > 0 ? processedData[processedData.length - 1] : null;
+
+  const hasAlarm =
+    latestRow &&
+    (latestRow.xbarStatus === "超限" || latestRow.rStatus === "超限");
+
   const handleInputChange = (index, value) => {
     const next = [...inputs];
     next[index] = value;
@@ -259,32 +333,67 @@ export default function App() {
       return;
     }
 
+    const time = formatDateTime();
+    const xbar = avg(nums);
+    const r = calcRange(nums);
+
+    const xbarOut = xbar > Number(xbarUCL) || xbar < Number(xbarLCL);
+    const rOut = r > Number(rUCL) || r < Number(rLCL);
+
     setGroups((prev) => [
       ...prev,
       {
         values: nums,
-        time: formatDateTime(),
+        time,
       },
     ]);
     setInputs(["", "", "", "", ""]);
+
+    if (xbarOut || rOut) {
+      const parts = [];
+      if (xbarOut) parts.push(`Xbar=${toFixedNum(xbar)} 超限`);
+      if (rOut) parts.push(`R=${toFixedNum(r)} 超限`);
+      const msg = `报警：${time} 新增数据超限，${parts.join("，")}`;
+      setAlarmMessage(msg);
+      alert(msg);
+    } else {
+      setAlarmMessage("");
+    }
   };
 
   const deleteLastGroup = () => {
     if (groups.length === 0) return;
     setGroups((prev) => prev.slice(0, -1));
+    setAlarmMessage("");
   };
 
   const clearAll = () => {
     if (!window.confirm("确定要清空所有数据吗？")) return;
     setInputs(["", "", "", "", ""]);
     setGroups([]);
+    setAlarmMessage("");
     localStorage.removeItem(STORAGE_KEY);
+  };
+
+  const exportData = () => {
+    if (processedData.length === 0) {
+      alert("当前没有可导出的数据");
+      return;
+    }
+    downloadCSV(processedData);
   };
 
   return (
     <div style={styles.page}>
       <div style={styles.container}>
         <h1 style={styles.title}>SPC Xbar-R 质量监控</h1>
+
+        {hasAlarm && (
+          <div style={styles.alarmBox}>
+            <strong>超限报警：</strong>
+            <span>{alarmMessage || "最新一组数据超限，请检查工艺状态。"}</span>
+          </div>
+        )}
 
         <div style={styles.card}>
           <h3 style={styles.cardTitle}>输入 5 个测量值</h3>
@@ -309,6 +418,9 @@ export default function App() {
             </button>
             <button onClick={clearAll} style={styles.button}>
               清空全部
+            </button>
+            <button onClick={exportData} style={styles.button}>
+              导出 CSV
             </button>
           </div>
         </div>
@@ -473,6 +585,15 @@ const styles = {
     fontWeight: "700",
     marginBottom: "24px",
     color: "#111827",
+  },
+  alarmBox: {
+    background: "#fef2f2",
+    border: "1px solid #fecaca",
+    color: "#b91c1c",
+    borderRadius: "14px",
+    padding: "14px 16px",
+    marginBottom: "20px",
+    boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
   },
   card: {
     background: "#ffffff",
