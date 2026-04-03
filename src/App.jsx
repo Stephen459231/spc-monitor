@@ -1,564 +1,588 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from 'react';
 
-const STORAGE_KEY = "spc-xbar-r-data-v1";
+const STORAGE_KEY = 'spc-monitor-records-v2';
+const SETTINGS_KEY = 'spc-monitor-settings-v2';
 
-function avg(arr) {
-  return arr.reduce((sum, n) => sum + n, 0) / arr.length;
+function formatDateTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '-';
+
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const dd = String(date.getDate()).padStart(2, '0');
+  const hh = String(date.getHours()).padStart(2, '0');
+  const min = String(date.getMinutes()).padStart(2, '0');
+  const sec = String(date.getSeconds()).padStart(2, '0');
+
+  return `${yyyy}-${mm}-${dd} ${hh}:${min}:${sec}`;
 }
 
-function calcRange(arr) {
-  return Math.max(...arr) - Math.min(...arr);
-}
-
-function toFixedNum(value, digits = 2) {
-  return Number(value).toFixed(digits);
-}
-
-function getYPosition(value, min, max, height) {
-  if (max === min) return height / 2;
-  const ratio = (value - min) / (max - min);
-  return height - ratio * height;
-}
-
-function formatDateTime() {
-  return new Date().toLocaleString("zh-CN", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  });
-}
-
-function downloadCSV(rows) {
-  const header = [
-    "组别",
-    "记录时间",
-    "测量值1",
-    "测量值2",
-    "测量值3",
-    "测量值4",
-    "测量值5",
-    "平均值Xbar",
-    "极差R",
-    "Xbar判定",
-    "R判定",
-  ];
-
-  const csvRows = rows.map((row) => [
-    row.name,
-    row.time || "",
-    row.values[0],
-    row.values[1],
-    row.values[2],
-    row.values[3],
-    row.values[4],
-    toFixedNum(row.xbar),
-    toFixedNum(row.r),
-    row.xbarStatus,
-    row.rStatus,
-  ]);
-
-  const csvContent = [header, ...csvRows]
-    .map((line) =>
-      line
-        .map((cell) => `"${String(cell ?? "").replace(/"/g, '""')}"`)
-        .join(",")
-    )
-    .join("\n");
-
-  const blob = new Blob(["\uFEFF" + csvContent], {
-    type: "text/csv;charset=utf-8;",
-  });
+function downloadFile(filename, content, type) {
+  const blob = new Blob([content], { type });
   const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `spc_data_${new Date()
-    .toISOString()
-    .slice(0, 19)
-    .replace(/[:T]/g, "-")}.csv`;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
   URL.revokeObjectURL(url);
 }
 
-function SimpleLineChart({
-  title,
-  data,
-  valueKey,
-  labels,
-  ucl,
-  cl,
-  lcl,
-  color = "#2563eb",
-}) {
-  const width = 760;
-  const height = 260;
-  const padding = 40;
+function calculateStats(values) {
+  if (!values.length) {
+    return {
+      count: 0,
+      mean: 0,
+      min: 0,
+      max: 0,
+      range: 0,
+      std: 0,
+    };
+  }
 
-  const values = data.map((d) => d[valueKey]);
-  const allValues = [...values, Number(ucl), Number(cl), Number(lcl)].filter(
-    (v) => Number.isFinite(v)
-  );
+  const count = values.length;
+  const mean = values.reduce((sum, value) => sum + value, 0) / count;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min;
 
-  const minVal = Math.min(...allValues, 0);
-  const maxVal = Math.max(...allValues, 1);
+  const variance =
+    count > 1
+      ? values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (count - 1)
+      : 0;
 
-  const innerWidth = width - padding * 2;
-  const innerHeight = height - padding * 2;
+  return {
+    count,
+    mean,
+    min,
+    max,
+    range,
+    std: Math.sqrt(variance),
+  };
+}
 
-  const points = data.map((d, i) => {
-    const x =
-      data.length === 1
-        ? padding + innerWidth / 2
-        : padding + (i * innerWidth) / (data.length - 1);
-    const y = padding + getYPosition(d[valueKey], minVal, maxVal, innerHeight);
-    return { x, y, value: d[valueKey], label: labels[i] };
-  });
+function SimpleLineChart({ data, usl, lsl, height = 320 }) {
+  const width = 980;
+  const padding = { top: 24, right: 28, bottom: 42, left: 52 };
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
 
-  const polyline = points.map((p) => `${p.x},${p.y}`).join(" ");
+  if (!data.length) {
+    return (
+      <div style={styles.emptyChart}>
+        暂无数据，请先录入测量值
+      </div>
+    );
+  }
 
-  const lineY = (value) =>
-    padding + getYPosition(Number(value), minVal, maxVal, innerHeight);
+  const numericValues = data.map((item) => item.value);
+  const allValues = [...numericValues];
+  if (usl !== '') allValues.push(Number(usl));
+  if (lsl !== '') allValues.push(Number(lsl));
+
+  const minValue = Math.min(...allValues);
+  const maxValue = Math.max(...allValues);
+  const span = maxValue - minValue || 1;
+  const buffer = span * 0.12 || 1;
+  const chartMin = minValue - buffer;
+  const chartMax = maxValue + buffer;
+
+  const getX = (index) => {
+    if (data.length === 1) return padding.left + plotWidth / 2;
+    return padding.left + (index / (data.length - 1)) * plotWidth;
+  };
+
+  const getY = (value) => {
+    const ratio = (value - chartMin) / (chartMax - chartMin || 1);
+    return padding.top + plotHeight - ratio * plotHeight;
+  };
+
+  const linePath = data
+    .map((item, index) => `${index === 0 ? 'M' : 'L'} ${getX(index)} ${getY(item.value)}`)
+    .join(' ');
+
+  const yTicks = Array.from({ length: 5 }, (_, i) => chartMin + ((chartMax - chartMin) / 4) * i);
+  const tickStep = Math.max(1, Math.ceil(data.length / 10));
 
   return (
-    <div style={styles.card}>
-      <h3 style={styles.cardTitle}>{title}</h3>
-      <svg
-        viewBox={`0 0 ${width} ${height}`}
-        style={{ width: "100%", height: "auto", background: "#fff" }}
-      >
-        <rect
-          x="0"
-          y="0"
-          width={width}
-          height={height}
-          fill="#ffffff"
-          stroke="#e5e7eb"
-        />
+    <div style={styles.chartWrap}>
+      <svg viewBox={`0 0 ${width} ${height}`} style={styles.svg}>
+        <rect x="0" y="0" width={width} height={height} fill="#ffffff" rx="16" />
 
-        {[0, 1, 2, 3, 4].map((i) => {
-          const y = padding + (innerHeight / 4) * i;
+        {yTicks.map((tick, index) => {
+          const y = getY(tick);
           return (
-            <line
-              key={i}
-              x1={padding}
-              y1={y}
-              x2={width - padding}
-              y2={y}
-              stroke="#e5e7eb"
-              strokeWidth="1"
-            />
+            <g key={index}>
+              <line
+                x1={padding.left}
+                y1={y}
+                x2={width - padding.right}
+                y2={y}
+                stroke="#e5e7eb"
+                strokeWidth="1"
+              />
+              <text x={padding.left - 10} y={y + 4} textAnchor="end" fontSize="12" fill="#6b7280">
+                {tick.toFixed(2)}
+              </text>
+            </g>
           );
         })}
 
         <line
-          x1={padding}
-          y1={lineY(ucl)}
-          x2={width - padding}
-          y2={lineY(ucl)}
-          stroke="#dc2626"
-          strokeDasharray="6 4"
-          strokeWidth="2"
+          x1={padding.left}
+          y1={padding.top}
+          x2={padding.left}
+          y2={height - padding.bottom}
+          stroke="#9ca3af"
+          strokeWidth="1.2"
         />
         <line
-          x1={padding}
-          y1={lineY(cl)}
-          x2={width - padding}
-          y2={lineY(cl)}
-          stroke="#16a34a"
-          strokeDasharray="6 4"
-          strokeWidth="2"
-        />
-        <line
-          x1={padding}
-          y1={lineY(lcl)}
-          x2={width - padding}
-          y2={lineY(lcl)}
-          stroke="#dc2626"
-          strokeDasharray="6 4"
-          strokeWidth="2"
+          x1={padding.left}
+          y1={height - padding.bottom}
+          x2={width - padding.right}
+          y2={height - padding.bottom}
+          stroke="#9ca3af"
+          strokeWidth="1.2"
         />
 
-        <text x={width - 120} y={lineY(ucl) - 6} fontSize="12" fill="#dc2626">
-          UCL {ucl}
-        </text>
-        <text x={width - 120} y={lineY(cl) - 6} fontSize="12" fill="#16a34a">
-          CL {cl}
-        </text>
-        <text x={width - 120} y={lineY(lcl) - 6} fontSize="12" fill="#dc2626">
-          LCL {lcl}
-        </text>
-
-        {points.length > 1 && (
-          <polyline
-            fill="none"
-            stroke={color}
-            strokeWidth="3"
-            points={polyline}
-          />
-        )}
-
-        {points.map((p, i) => (
-          <g key={i}>
-            <circle cx={p.x} cy={p.y} r="4" fill={color} />
+        {lsl !== '' && (
+          <g>
+            <line
+              x1={padding.left}
+              y1={getY(Number(lsl))}
+              x2={width - padding.right}
+              y2={getY(Number(lsl))}
+              stroke="#f59e0b"
+              strokeWidth="1.5"
+              strokeDasharray="6 6"
+            />
             <text
-              x={p.x}
-              y={height - 10}
-              textAnchor="middle"
-              fontSize="11"
-              fill="#374151"
+              x={width - padding.right}
+              y={getY(Number(lsl)) - 6}
+              textAnchor="end"
+              fontSize="12"
+              fill="#b45309"
             >
-              {p.label}
-            </text>
-            <text
-              x={p.x}
-              y={p.y - 10}
-              textAnchor="middle"
-              fontSize="11"
-              fill="#111827"
-            >
-              {toFixedNum(p.value)}
+              LSL {Number(lsl).toFixed(2)}
             </text>
           </g>
-        ))}
+        )}
+
+        {usl !== '' && (
+          <g>
+            <line
+              x1={padding.left}
+              y1={getY(Number(usl))}
+              x2={width - padding.right}
+              y2={getY(Number(usl))}
+              stroke="#dc2626"
+              strokeWidth="1.5"
+              strokeDasharray="6 6"
+            />
+            <text
+              x={width - padding.right}
+              y={getY(Number(usl)) - 6}
+              textAnchor="end"
+              fontSize="12"
+              fill="#b91c1c"
+            >
+              USL {Number(usl).toFixed(2)}
+            </text>
+          </g>
+        )}
+
+        <path d={linePath} fill="none" stroke="#2563eb" strokeWidth="2.5" />
+
+        {data.map((item, index) => {
+          const outOfLimit =
+            (usl !== '' && item.value > Number(usl)) ||
+            (lsl !== '' && item.value < Number(lsl));
+
+          return (
+            <g key={item.id}>
+              <circle
+                cx={getX(index)}
+                cy={getY(item.value)}
+                r="4.5"
+                fill={outOfLimit ? '#dc2626' : '#2563eb'}
+              />
+              <title>{`组别 ${index + 1}\n值: ${item.value}\n时间: ${formatDateTime(item.time)}`}</title>
+            </g>
+          );
+        })}
+
+        {data.map((_, index) => {
+          if ((index + 1) % tickStep !== 0 && index !== 0 && index !== data.length - 1) return null;
+          return (
+            <text
+              key={`x-${index}`}
+              x={getX(index)}
+              y={height - padding.bottom + 18}
+              textAnchor="middle"
+              fontSize="12"
+              fill="#6b7280"
+            >
+              {index + 1}
+            </text>
+          );
+        })}
+
+        <text
+          x={width / 2}
+          y={height - 10}
+          textAnchor="middle"
+          fontSize="13"
+          fill="#374151"
+          fontWeight="600"
+        >
+          组别
+        </text>
+
+        <text
+          x={18}
+          y={height / 2}
+          textAnchor="middle"
+          fontSize="13"
+          fill="#374151"
+          fontWeight="600"
+          transform={`rotate(-90 18 ${height / 2})`}
+        >
+          测量值
+        </text>
       </svg>
     </div>
   );
 }
 
 export default function App() {
-  const [inputs, setInputs] = useState(["", "", "", "", ""]);
-  const [groups, setGroups] = useState([]);
-
-  const [xbarUCL, setXbarUCL] = useState("1.50");
-  const [xbarCL, setXbarCL] = useState("1.00");
-  const [xbarLCL, setXbarLCL] = useState("0.50");
-
-  const [rUCL, setRUCL] = useState("1.00");
-  const [rCL, setRCL] = useState("0.50");
-  const [rLCL, setRLCL] = useState("0.00");
-
-  const [alarmMessage, setAlarmMessage] = useState("");
+  const [inputValue, setInputValue] = useState('');
+  const [records, setRecords] = useState([]);
+  const [usl, setUsl] = useState('');
+  const [lsl, setLsl] = useState('');
+  const [message, setMessage] = useState('');
 
   useEffect(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (!saved) return;
-
     try {
-      const parsed = JSON.parse(saved);
-      setInputs(parsed.inputs || ["", "", "", "", ""]);
-      setGroups(parsed.groups || []);
-      setXbarUCL(parsed.xbarUCL || "1.50");
-      setXbarCL(parsed.xbarCL || "1.00");
-      setXbarLCL(parsed.xbarLCL || "0.50");
-      setRUCL(parsed.rUCL || "1.00");
-      setRCL(parsed.rCL || "0.50");
-      setRLCL(parsed.rLCL || "0.00");
-      setAlarmMessage(parsed.alarmMessage || "");
-    } catch (e) {
-      console.error("读取本地数据失败", e);
+      const savedRecords = localStorage.getItem(STORAGE_KEY);
+      const savedSettings = localStorage.getItem(SETTINGS_KEY);
+
+      if (savedRecords) {
+        const parsed = JSON.parse(savedRecords);
+        if (Array.isArray(parsed)) {
+          setRecords(parsed);
+        }
+      }
+
+      if (savedSettings) {
+        const parsedSettings = JSON.parse(savedSettings);
+        setUsl(parsedSettings.usl ?? '');
+        setLsl(parsedSettings.lsl ?? '');
+      }
+    } catch (error) {
+      console.error('读取本地数据失败：', error);
     }
   }, []);
 
   useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
+  }, [records]);
+
+  useEffect(() => {
     localStorage.setItem(
-      STORAGE_KEY,
+      SETTINGS_KEY,
       JSON.stringify({
-        inputs,
-        groups,
-        xbarUCL,
-        xbarCL,
-        xbarLCL,
-        rUCL,
-        rCL,
-        rLCL,
-        alarmMessage,
+        usl,
+        lsl,
       })
     );
-  }, [
-    inputs,
-    groups,
-    xbarUCL,
-    xbarCL,
-    xbarLCL,
-    rUCL,
-    rCL,
-    rLCL,
-    alarmMessage,
-  ]);
+  }, [usl, lsl]);
 
-  const processedData = useMemo(() => {
-    return groups.map((group, index) => {
-      const xbar = avg(group.values);
-      const r = calcRange(group.values);
+  const stats = useMemo(() => calculateStats(records.map((item) => item.value)), [records]);
 
-      return {
-        id: index + 1,
-        name: `第${index + 1}组`,
-        time: group.time || "",
-        values: group.values,
-        xbar,
-        r,
-        xbarStatus:
-          xbar > Number(xbarUCL) || xbar < Number(xbarLCL) ? "超限" : "正常",
-        rStatus:
-          r > Number(rUCL) || r < Number(rLCL) ? "超限" : "正常",
-      };
+  const alarmCount = useMemo(() => {
+    return records.filter((item) => {
+      if (usl !== '' && item.value > Number(usl)) return true;
+      if (lsl !== '' && item.value < Number(lsl)) return true;
+      return false;
+    }).length;
+  }, [records, usl, lsl]);
+
+  const latestAlarm = useMemo(() => {
+    if (!records.length) return '';
+
+    const latest = records[records.length - 1];
+    if (usl !== '' && latest.value > Number(usl)) {
+      return `最新一组超上限：${latest.value} > ${usl}`;
+    }
+    if (lsl !== '' && latest.value < Number(lsl)) {
+      return `最新一组超下限：${latest.value} < ${lsl}`;
+    }
+    return '';
+  }, [records, usl, lsl]);
+
+  const handleAddRecord = () => {
+    const numericValue = Number(inputValue);
+
+    if (inputValue === '' || Number.isNaN(numericValue)) {
+      setMessage('请输入有效数字');
+      return;
+    }
+
+    const newRecord = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      value: numericValue,
+      time: new Date().toISOString(),
+    };
+
+    setRecords((prev) => [...prev, newRecord]);
+    setInputValue('');
+
+    if (usl !== '' && numericValue > Number(usl)) {
+      setMessage(`已记录。当前值 ${numericValue} 超过上限 ${usl}`);
+      return;
+    }
+
+    if (lsl !== '' && numericValue < Number(lsl)) {
+      setMessage(`已记录。当前值 ${numericValue} 低于下限 ${lsl}`);
+      return;
+    }
+
+    setMessage('记录成功');
+  };
+
+  const handleDeleteRecord = (id) => {
+    setRecords((prev) => prev.filter((item) => item.id !== id));
+    setMessage('已删除该条记录');
+  };
+
+  const handleClearAll = () => {
+    const confirmed = window.confirm('确定清空全部记录吗？此操作不可恢复。');
+    if (!confirmed) return;
+
+    setRecords([]);
+    setMessage('全部记录已清空');
+  };
+
+  const handleExportCSV = () => {
+    const headers = ['组别', '时间', '测量值', '状态'];
+    const rows = records.map((item, index) => {
+      const status =
+        (usl !== '' && item.value > Number(usl)) || (lsl !== '' && item.value < Number(lsl))
+          ? '超限'
+          : '正常';
+      return [index + 1, formatDateTime(item.time), item.value, status];
     });
-  }, [groups, xbarUCL, xbarLCL, rUCL, rLCL]);
 
-  const latestRow =
-    processedData.length > 0 ? processedData[processedData.length - 1] : null;
+    const csvContent = [headers, ...rows]
+      .map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+      .join('\n');
 
-  const hasAlarm =
-    latestRow &&
-    (latestRow.xbarStatus === "超限" || latestRow.rStatus === "超限");
-
-  const handleInputChange = (index, value) => {
-    const next = [...inputs];
-    next[index] = value;
-    setInputs(next);
+    downloadFile(`spc-records-${Date.now()}.csv`, `\ufeff${csvContent}`, 'text/csv;charset=utf-8;');
+    setMessage('CSV 已导出');
   };
 
-  const addGroup = () => {
-    const nums = inputs.map((v) => Number(v));
-    const isValid = nums.length === 5 && nums.every((n) => !Number.isNaN(n));
-
-    if (!isValid) {
-      alert("请输入 5 个有效数字");
-      return;
-    }
-
-    const time = formatDateTime();
-    const xbar = avg(nums);
-    const r = calcRange(nums);
-
-    const xbarOut = xbar > Number(xbarUCL) || xbar < Number(xbarLCL);
-    const rOut = r > Number(rUCL) || r < Number(rLCL);
-
-    setGroups((prev) => [
-      ...prev,
+  const handleExportJSON = () => {
+    const content = JSON.stringify(
       {
-        values: nums,
-        time,
+        settings: { usl, lsl },
+        records,
       },
-    ]);
-    setInputs(["", "", "", "", ""]);
+      null,
+      2
+    );
 
-    if (xbarOut || rOut) {
-      const parts = [];
-      if (xbarOut) parts.push(`Xbar=${toFixedNum(xbar)} 超限`);
-      if (rOut) parts.push(`R=${toFixedNum(r)} 超限`);
-      const msg = `报警：${time} 新增数据超限，${parts.join("，")}`;
-      setAlarmMessage(msg);
-      alert(msg);
-    } else {
-      setAlarmMessage("");
-    }
+    downloadFile(`spc-records-${Date.now()}.json`, content, 'application/json;charset=utf-8;');
+    setMessage('JSON 已导出');
   };
 
-  const deleteLastGroup = () => {
-    if (groups.length === 0) return;
-    setGroups((prev) => prev.slice(0, -1));
-    setAlarmMessage("");
-  };
+  const handleImportJSON = (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
 
-  const clearAll = () => {
-    if (!window.confirm("确定要清空所有数据吗？")) return;
-    setInputs(["", "", "", "", ""]);
-    setGroups([]);
-    setAlarmMessage("");
-    localStorage.removeItem(STORAGE_KEY);
-  };
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        const importedRecords = Array.isArray(parsed.records) ? parsed.records : [];
 
-  const exportData = () => {
-    if (processedData.length === 0) {
-      alert("当前没有可导出的数据");
-      return;
-    }
-    downloadCSV(processedData);
+        setRecords(
+          importedRecords.map((item, index) => ({
+            id: item.id || `${Date.now()}-${index}`,
+            value: Number(item.value),
+            time: item.time || new Date().toISOString(),
+          }))
+        );
+
+        if (parsed.settings) {
+          setUsl(parsed.settings.usl ?? '');
+          setLsl(parsed.settings.lsl ?? '');
+        }
+
+        setMessage('JSON 导入成功');
+      } catch (error) {
+        console.error(error);
+        setMessage('导入失败，请确认 JSON 文件格式正确');
+      }
+    };
+
+    reader.readAsText(file);
+    event.target.value = '';
   };
 
   return (
     <div style={styles.page}>
       <div style={styles.container}>
-        <h1 style={styles.title}>SPC Xbar-R 质量监控</h1>
-
-        {hasAlarm && (
-          <div style={styles.alarmBox}>
-            <strong>超限报警：</strong>
-            <span>{alarmMessage || "最新一组数据超限，请检查工艺状态。"}</span>
+        <div style={styles.headerRow}>
+          <div>
+            <h1 style={styles.title}>SPC 监控面板</h1>
+            <p style={styles.subtitle}>图表横坐标已改为组别，数据明细保留时间记录</p>
           </div>
-        )}
+        </div>
 
         <div style={styles.card}>
-          <h3 style={styles.cardTitle}>输入 5 个测量值</h3>
-          <div style={styles.inputRow}>
-            {inputs.map((v, i) => (
-              <input
-                key={i}
-                value={v}
-                onChange={(e) => handleInputChange(i, e.target.value)}
-                placeholder={`值${i + 1}`}
-                style={styles.input}
-              />
-            ))}
+          <div style={styles.grid2}>
+            <div>
+              <label style={styles.label}>录入测量值</label>
+              <div style={styles.inputRow}>
+                <input
+                  type="number"
+                  step="any"
+                  value={inputValue}
+                  onChange={(e) => setInputValue(e.target.value)}
+                  placeholder="请输入测量值"
+                  style={styles.input}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleAddRecord();
+                  }}
+                />
+                <button onClick={handleAddRecord} style={styles.primaryButton}>
+                  添加记录
+                </button>
+              </div>
+            </div>
+
+            <div style={styles.limitGrid}>
+              <div>
+                <label style={styles.label}>上限 USL</label>
+                <input
+                  type="number"
+                  step="any"
+                  value={usl}
+                  onChange={(e) => setUsl(e.target.value)}
+                  placeholder="可选"
+                  style={styles.input}
+                />
+              </div>
+              <div>
+                <label style={styles.label}>下限 LSL</label>
+                <input
+                  type="number"
+                  step="any"
+                  value={lsl}
+                  onChange={(e) => setLsl(e.target.value)}
+                  placeholder="可选"
+                  style={styles.input}
+                />
+              </div>
+            </div>
           </div>
 
-          <div style={styles.buttonRow}>
-            <button onClick={addGroup} style={styles.primaryButton}>
-              添加数据
-            </button>
-            <button onClick={deleteLastGroup} style={styles.button}>
-              删除最后一组
-            </button>
-            <button onClick={clearAll} style={styles.button}>
-              清空全部
-            </button>
-            <button onClick={exportData} style={styles.button}>
+          <div style={styles.toolbar}>
+            <button onClick={handleExportCSV} style={styles.secondaryButton}>
               导出 CSV
             </button>
+            <button onClick={handleExportJSON} style={styles.secondaryButton}>
+              导出 JSON
+            </button>
+            <label style={styles.uploadButton}>
+              导入 JSON
+              <input type="file" accept="application/json" onChange={handleImportJSON} hidden />
+            </label>
+            <button onClick={handleClearAll} style={styles.dangerButton}>
+              清空全部
+            </button>
           </div>
+
+          {message ? <div style={styles.message}>{message}</div> : null}
+          {latestAlarm ? <div style={styles.alarm}>{latestAlarm}</div> : null}
         </div>
 
-        <div style={styles.limitGrid}>
-          <div style={styles.card}>
-            <h3 style={styles.cardTitle}>Xbar 控制限</h3>
-            <div style={styles.limitRow}>
-              <label style={styles.label}>UCL</label>
-              <input
-                value={xbarUCL}
-                onChange={(e) => setXbarUCL(e.target.value)}
-                style={styles.smallInput}
-              />
-            </div>
-            <div style={styles.limitRow}>
-              <label style={styles.label}>CL</label>
-              <input
-                value={xbarCL}
-                onChange={(e) => setXbarCL(e.target.value)}
-                style={styles.smallInput}
-              />
-            </div>
-            <div style={styles.limitRow}>
-              <label style={styles.label}>LCL</label>
-              <input
-                value={xbarLCL}
-                onChange={(e) => setXbarLCL(e.target.value)}
-                style={styles.smallInput}
-              />
-            </div>
+        <div style={styles.statsGrid}>
+          <div style={styles.statCard}>
+            <div style={styles.statLabel}>总组数</div>
+            <div style={styles.statValue}>{stats.count}</div>
           </div>
-
-          <div style={styles.card}>
-            <h3 style={styles.cardTitle}>R 控制限</h3>
-            <div style={styles.limitRow}>
-              <label style={styles.label}>UCL</label>
-              <input
-                value={rUCL}
-                onChange={(e) => setRUCL(e.target.value)}
-                style={styles.smallInput}
-              />
-            </div>
-            <div style={styles.limitRow}>
-              <label style={styles.label}>CL</label>
-              <input
-                value={rCL}
-                onChange={(e) => setRCL(e.target.value)}
-                style={styles.smallInput}
-              />
-            </div>
-            <div style={styles.limitRow}>
-              <label style={styles.label}>LCL</label>
-              <input
-                value={rLCL}
-                onChange={(e) => setRLCL(e.target.value)}
-                style={styles.smallInput}
-              />
-            </div>
+          <div style={styles.statCard}>
+            <div style={styles.statLabel}>平均值</div>
+            <div style={styles.statValue}>{stats.mean.toFixed(3)}</div>
+          </div>
+          <div style={styles.statCard}>
+            <div style={styles.statLabel}>标准差</div>
+            <div style={styles.statValue}>{stats.std.toFixed(3)}</div>
+          </div>
+          <div style={styles.statCard}>
+            <div style={styles.statLabel}>超限组数</div>
+            <div style={styles.statValue}>{alarmCount}</div>
           </div>
         </div>
-
-        <SimpleLineChart
-          title="Xbar 图"
-          data={processedData}
-          valueKey="xbar"
-          labels={processedData.map((d) => d.time || d.name)}
-          ucl={xbarUCL}
-          cl={xbarCL}
-          lcl={xbarLCL}
-          color="#2563eb"
-        />
-
-        <SimpleLineChart
-          title="R 图"
-          data={processedData}
-          valueKey="r"
-          labels={processedData.map((d) => d.time || d.name)}
-          ucl={rUCL}
-          cl={rCL}
-          lcl={rLCL}
-          color="#ea580c"
-        />
 
         <div style={styles.card}>
-          <h3 style={styles.cardTitle}>数据明细</h3>
-          <div style={{ overflowX: "auto" }}>
+          <h2 style={styles.sectionTitle}>趋势图</h2>
+          <SimpleLineChart data={records} usl={usl} lsl={lsl} />
+        </div>
+
+        <div style={styles.card}>
+          <div style={styles.tableHeader}>
+            <h2 style={styles.sectionTitle}>数据明细</h2>
+            <div style={styles.smallTip}>图表看组别，明细保留时间</div>
+          </div>
+
+          <div style={styles.tableWrap}>
             <table style={styles.table}>
               <thead>
                 <tr>
                   <th style={styles.th}>组别</th>
-                  <th style={styles.th}>记录时间</th>
-                  <th style={styles.th}>5个测量值</th>
-                  <th style={styles.th}>平均值 Xbar</th>
-                  <th style={styles.th}>极差 R</th>
-                  <th style={styles.th}>Xbar 判定</th>
-                  <th style={styles.th}>R 判定</th>
+                  <th style={styles.th}>时间</th>
+                  <th style={styles.th}>测量值</th>
+                  <th style={styles.th}>状态</th>
+                  <th style={styles.th}>操作</th>
                 </tr>
               </thead>
               <tbody>
-                {processedData.length === 0 ? (
+                {records.length === 0 ? (
                   <tr>
-                    <td style={styles.td} colSpan="7">
-                      暂无数据
+                    <td colSpan="5" style={styles.emptyCell}>
+                      暂无记录
                     </td>
                   </tr>
                 ) : (
-                  processedData.map((row) => (
-                    <tr key={row.id}>
-                      <td style={styles.td}>{row.name}</td>
-                      <td style={styles.td}>{row.time || "-"}</td>
-                      <td style={styles.td}>
-                        {row.values.map((v) => toFixedNum(v)).join(" / ")}
-                      </td>
-                      <td style={styles.td}>{toFixedNum(row.xbar)}</td>
-                      <td style={styles.td}>{toFixedNum(row.r)}</td>
-                      <td
-                        style={{
-                          ...styles.td,
-                          color:
-                            row.xbarStatus === "超限" ? "#dc2626" : "#16a34a",
-                          fontWeight: 600,
-                        }}
-                      >
-                        {row.xbarStatus}
-                      </td>
-                      <td
-                        style={{
-                          ...styles.td,
-                          color:
-                            row.rStatus === "超限" ? "#dc2626" : "#16a34a",
-                          fontWeight: 600,
-                        }}
-                      >
-                        {row.rStatus}
-                      </td>
-                    </tr>
-                  ))
+                  records.map((item, index) => {
+                    const outOfLimit =
+                      (usl !== '' && item.value > Number(usl)) ||
+                      (lsl !== '' && item.value < Number(lsl));
+
+                    return (
+                      <tr key={item.id}>
+                        <td style={styles.td}>{index + 1}</td>
+                        <td style={styles.td}>{formatDateTime(item.time)}</td>
+                        <td style={styles.td}>{item.value}</td>
+                        <td style={styles.td}>
+                          <span
+                            style={{
+                              ...styles.badge,
+                              ...(outOfLimit ? styles.badgeAlarm : styles.badgeNormal),
+                            }}
+                          >
+                            {outOfLimit ? '超限' : '正常'}
+                          </span>
+                        </td>
+                        <td style={styles.td}>
+                          <button onClick={() => handleDeleteRecord(item.id)} style={styles.linkButton}>
+                            删除
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>
@@ -571,114 +595,250 @@ export default function App() {
 
 const styles = {
   page: {
-    minHeight: "100vh",
-    background: "#f3f4f6",
-    padding: "24px",
-    fontFamily: "Arial, sans-serif",
+    minHeight: '100vh',
+    background: '#f3f4f6',
+    padding: '24px',
+    boxSizing: 'border-box',
+    fontFamily:
+      'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif',
+    color: '#111827',
   },
   container: {
-    maxWidth: "1100px",
-    margin: "0 auto",
+    maxWidth: '1180px',
+    margin: '0 auto',
+  },
+  headerRow: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: '18px',
   },
   title: {
-    fontSize: "42px",
-    fontWeight: "700",
-    marginBottom: "24px",
-    color: "#111827",
+    margin: 0,
+    fontSize: '30px',
+    fontWeight: 800,
   },
-  alarmBox: {
-    background: "#fef2f2",
-    border: "1px solid #fecaca",
-    color: "#b91c1c",
-    borderRadius: "14px",
-    padding: "14px 16px",
-    marginBottom: "20px",
-    boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
+  subtitle: {
+    margin: '8px 0 0',
+    color: '#6b7280',
+    fontSize: '14px',
   },
   card: {
-    background: "#ffffff",
-    border: "1px solid #e5e7eb",
-    borderRadius: "14px",
-    padding: "20px",
-    marginBottom: "20px",
-    boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
+    background: '#ffffff',
+    borderRadius: '18px',
+    padding: '20px',
+    boxShadow: '0 10px 30px rgba(15, 23, 42, 0.06)',
+    marginBottom: '18px',
   },
-  cardTitle: {
-    margin: "0 0 16px 0",
-    fontSize: "22px",
-    color: "#111827",
+  grid2: {
+    display: 'grid',
+    gridTemplateColumns: '1.4fr 1fr',
+    gap: '16px',
   },
   inputRow: {
-    display: "grid",
-    gridTemplateColumns: "repeat(5, 1fr)",
-    gap: "10px",
-    marginBottom: "14px",
-  },
-  input: {
-    padding: "10px 12px",
-    fontSize: "16px",
-    border: "1px solid #d1d5db",
-    borderRadius: "8px",
-  },
-  smallInput: {
-    width: "120px",
-    padding: "8px 10px",
-    fontSize: "15px",
-    border: "1px solid #d1d5db",
-    borderRadius: "8px",
-  },
-  buttonRow: {
-    display: "flex",
-    gap: "10px",
-    flexWrap: "wrap",
-  },
-  primaryButton: {
-    background: "#2563eb",
-    color: "#ffffff",
-    border: "none",
-    borderRadius: "8px",
-    padding: "10px 16px",
-    fontSize: "15px",
-    cursor: "pointer",
-  },
-  button: {
-    background: "#ffffff",
-    color: "#111827",
-    border: "1px solid #d1d5db",
-    borderRadius: "8px",
-    padding: "10px 16px",
-    fontSize: "15px",
-    cursor: "pointer",
+    display: 'flex',
+    gap: '10px',
+    alignItems: 'center',
   },
   limitGrid: {
-    display: "grid",
-    gridTemplateColumns: "1fr 1fr",
-    gap: "20px",
-  },
-  limitRow: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: "12px",
+    display: 'grid',
+    gridTemplateColumns: '1fr 1fr',
+    gap: '12px',
   },
   label: {
-    fontSize: "16px",
-    color: "#374151",
+    display: 'block',
+    fontSize: '14px',
+    fontWeight: 600,
+    marginBottom: '8px',
+    color: '#374151',
+  },
+  input: {
+    width: '100%',
+    boxSizing: 'border-box',
+    padding: '12px 14px',
+    borderRadius: '12px',
+    border: '1px solid #d1d5db',
+    fontSize: '14px',
+    outline: 'none',
+  },
+  primaryButton: {
+    border: 'none',
+    background: '#2563eb',
+    color: '#ffffff',
+    borderRadius: '12px',
+    padding: '12px 18px',
+    fontSize: '14px',
+    fontWeight: 700,
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+  },
+  secondaryButton: {
+    border: '1px solid #d1d5db',
+    background: '#ffffff',
+    color: '#111827',
+    borderRadius: '12px',
+    padding: '10px 14px',
+    fontSize: '14px',
+    fontWeight: 600,
+    cursor: 'pointer',
+  },
+  uploadButton: {
+    border: '1px solid #d1d5db',
+    background: '#ffffff',
+    color: '#111827',
+    borderRadius: '12px',
+    padding: '10px 14px',
+    fontSize: '14px',
+    fontWeight: 600,
+    cursor: 'pointer',
+    display: 'inline-flex',
+    alignItems: 'center',
+  },
+  dangerButton: {
+    border: 'none',
+    background: '#dc2626',
+    color: '#ffffff',
+    borderRadius: '12px',
+    padding: '10px 14px',
+    fontSize: '14px',
+    fontWeight: 700,
+    cursor: 'pointer',
+  },
+  toolbar: {
+    display: 'flex',
+    gap: '10px',
+    flexWrap: 'wrap',
+    marginTop: '16px',
+  },
+  message: {
+    marginTop: '14px',
+    padding: '12px 14px',
+    borderRadius: '12px',
+    background: '#eff6ff',
+    color: '#1d4ed8',
+    fontSize: '14px',
+    fontWeight: 600,
+  },
+  alarm: {
+    marginTop: '10px',
+    padding: '12px 14px',
+    borderRadius: '12px',
+    background: '#fef2f2',
+    color: '#b91c1c',
+    fontSize: '14px',
+    fontWeight: 700,
+  },
+  statsGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(4, 1fr)',
+    gap: '14px',
+    marginBottom: '18px',
+  },
+  statCard: {
+    background: '#ffffff',
+    borderRadius: '18px',
+    padding: '18px',
+    boxShadow: '0 10px 30px rgba(15, 23, 42, 0.05)',
+  },
+  statLabel: {
+    color: '#6b7280',
+    fontSize: '13px',
+    marginBottom: '8px',
+  },
+  statValue: {
+    fontSize: '28px',
+    fontWeight: 800,
+    color: '#111827',
+  },
+  sectionTitle: {
+    margin: 0,
+    fontSize: '20px',
+    fontWeight: 800,
+    color: '#111827',
+  },
+  chartWrap: {
+    marginTop: '14px',
+    width: '100%',
+    overflowX: 'auto',
+    border: '1px solid #e5e7eb',
+    borderRadius: '16px',
+    background: '#ffffff',
+  },
+  svg: {
+    width: '100%',
+    minWidth: '920px',
+    display: 'block',
+  },
+  emptyChart: {
+    height: '220px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    color: '#9ca3af',
+    border: '1px dashed #d1d5db',
+    borderRadius: '16px',
+    marginTop: '14px',
+  },
+  tableHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: '12px',
+  },
+  smallTip: {
+    fontSize: '13px',
+    color: '#6b7280',
+  },
+  tableWrap: {
+    overflowX: 'auto',
+    marginTop: '14px',
+    border: '1px solid #e5e7eb',
+    borderRadius: '14px',
   },
   table: {
-    width: "100%",
-    borderCollapse: "collapse",
+    width: '100%',
+    borderCollapse: 'collapse',
+    minWidth: '760px',
   },
   th: {
-    textAlign: "left",
-    padding: "12px",
-    borderBottom: "1px solid #e5e7eb",
-    background: "#f9fafb",
-    whiteSpace: "nowrap",
+    background: '#f9fafb',
+    textAlign: 'left',
+    padding: '12px 14px',
+    fontSize: '13px',
+    color: '#374151',
+    borderBottom: '1px solid #e5e7eb',
   },
   td: {
-    padding: "12px",
-    borderBottom: "1px solid #e5e7eb",
-    whiteSpace: "nowrap",
+    padding: '12px 14px',
+    fontSize: '14px',
+    borderBottom: '1px solid #f3f4f6',
+  },
+  emptyCell: {
+    padding: '24px',
+    textAlign: 'center',
+    color: '#9ca3af',
+  },
+  badge: {
+    display: 'inline-block',
+    padding: '4px 10px',
+    borderRadius: '999px',
+    fontSize: '12px',
+    fontWeight: 700,
+  },
+  badgeNormal: {
+    background: '#ecfdf5',
+    color: '#047857',
+  },
+  badgeAlarm: {
+    background: '#fef2f2',
+    color: '#b91c1c',
+  },
+  linkButton: {
+    border: 'none',
+    background: 'transparent',
+    color: '#dc2626',
+    fontWeight: 700,
+    cursor: 'pointer',
+    padding: 0,
   },
 };
