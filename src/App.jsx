@@ -1,20 +1,21 @@
 import React, { useEffect, useMemo, useState } from 'react';
 
-const STORAGE_KEY = 'spc-monitor-records-v2';
-const SETTINGS_KEY = 'spc-monitor-settings-v2';
+const STORAGE_KEY = 'spc-xbar-r-records-v1';
+const LIMITS_KEY = 'spc-xbar-r-limits-v1';
 
-function formatDateTime(value) {
+function formatDate(value) {
+  if (!value) return '-';
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '-';
-
+  if (Number.isNaN(date.getTime())) return value;
   const yyyy = date.getFullYear();
   const mm = String(date.getMonth() + 1).padStart(2, '0');
   const dd = String(date.getDate()).padStart(2, '0');
-  const hh = String(date.getHours()).padStart(2, '0');
-  const min = String(date.getMinutes()).padStart(2, '0');
-  const sec = String(date.getSeconds()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
 
-  return `${yyyy}-${mm}-${dd} ${hh}:${min}:${sec}`;
+function toNumber(value) {
+  const num = Number(value);
+  return Number.isNaN(num) ? null : num;
 }
 
 function downloadFile(filename, content, type) {
@@ -27,64 +28,57 @@ function downloadFile(filename, content, type) {
   URL.revokeObjectURL(url);
 }
 
-function calculateStats(values) {
-  if (!values.length) {
+function calcGroupStats(values) {
+  const numbers = values.map((item) => Number(item));
+  const mean = numbers.reduce((sum, item) => sum + item, 0) / numbers.length;
+  const min = Math.min(...numbers);
+  const max = Math.max(...numbers);
+  const range = max - min;
+  return { mean, range };
+}
+
+function calcOverallStats(records) {
+  if (!records.length) {
     return {
-      count: 0,
-      mean: 0,
-      min: 0,
-      max: 0,
-      range: 0,
-      std: 0,
+      totalGroups: 0,
+      xDoubleBar: 0,
+      rBar: 0,
     };
   }
 
-  const count = values.length;
-  const mean = values.reduce((sum, value) => sum + value, 0) / count;
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const range = max - min;
-
-  const variance =
-    count > 1
-      ? values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (count - 1)
-      : 0;
+  const xDoubleBar = records.reduce((sum, item) => sum + item.mean, 0) / records.length;
+  const rBar = records.reduce((sum, item) => sum + item.range, 0) / records.length;
 
   return {
-    count,
-    mean,
-    min,
-    max,
-    range,
-    std: Math.sqrt(variance),
+    totalGroups: records.length,
+    xDoubleBar,
+    rBar,
   };
 }
 
-function SimpleLineChart({ data, usl, lsl, height = 320 }) {
+function ControlChart({ title, yLabel, data, cl, ucl, lcl, valueKey, lineColor }) {
   const width = 980;
-  const padding = { top: 24, right: 28, bottom: 42, left: 52 };
+  const height = 320;
+  const padding = { top: 24, right: 30, bottom: 44, left: 62 };
   const plotWidth = width - padding.left - padding.right;
   const plotHeight = height - padding.top - padding.bottom;
 
   if (!data.length) {
-    return (
-      <div style={styles.emptyChart}>
-        暂无数据，请先录入测量值
-      </div>
-    );
+    return <div style={styles.emptyChart}>暂无分组数据，请先录入每天 5 个数据</div>;
   }
 
-  const numericValues = data.map((item) => item.value);
-  const allValues = [...numericValues];
-  if (usl !== '') allValues.push(Number(usl));
-  if (lsl !== '') allValues.push(Number(lsl));
+  const series = data.map((item) => item[valueKey]);
+  const helperValues = [...series];
+  if (cl !== '') helperValues.push(Number(cl));
+  if (ucl !== '') helperValues.push(Number(ucl));
+  if (lcl !== '') helperValues.push(Number(lcl));
 
-  const minValue = Math.min(...allValues);
-  const maxValue = Math.max(...allValues);
-  const span = maxValue - minValue || 1;
-  const buffer = span * 0.12 || 1;
-  const chartMin = minValue - buffer;
-  const chartMax = maxValue + buffer;
+  const minVal = Math.min(...helperValues);
+  const maxVal = Math.max(...helperValues);
+  const span = maxVal - minVal || 1;
+  const buffer = span * 0.15 || 1;
+  const chartMin = minVal - buffer;
+  const chartMax = maxVal + buffer;
 
   const getX = (index) => {
     if (data.length === 1) return padding.left + plotWidth / 2;
@@ -96,186 +90,217 @@ function SimpleLineChart({ data, usl, lsl, height = 320 }) {
     return padding.top + plotHeight - ratio * plotHeight;
   };
 
-  const linePath = data
-    .map((item, index) => `${index === 0 ? 'M' : 'L'} ${getX(index)} ${getY(item.value)}`)
+  const pathD = data
+    .map((item, index) => `${index === 0 ? 'M' : 'L'} ${getX(index)} ${getY(item[valueKey])}`)
     .join(' ');
 
   const yTicks = Array.from({ length: 5 }, (_, i) => chartMin + ((chartMax - chartMin) / 4) * i);
   const tickStep = Math.max(1, Math.ceil(data.length / 10));
 
-  return (
-    <div style={styles.chartWrap}>
-      <svg viewBox={`0 0 ${width} ${height}`} style={styles.svg}>
-        <rect x="0" y="0" width={width} height={height} fill="#ffffff" rx="16" />
+  const isOut = (value) => {
+    if (ucl !== '' && value > Number(ucl)) return true;
+    if (lcl !== '' && value < Number(lcl)) return true;
+    return false;
+  };
 
-        {yTicks.map((tick, index) => {
-          const y = getY(tick);
-          return (
-            <g key={index}>
+  return (
+    <div style={styles.chartCard}>
+      <h3 style={styles.chartTitle}>{title}</h3>
+      <div style={styles.chartWrap}>
+        <svg viewBox={`0 0 ${width} ${height}`} style={styles.svg}>
+          <rect x="0" y="0" width={width} height={height} fill="#ffffff" rx="16" />
+
+          {yTicks.map((tick, index) => {
+            const y = getY(tick);
+            return (
+              <g key={index}>
+                <line
+                  x1={padding.left}
+                  y1={y}
+                  x2={width - padding.right}
+                  y2={y}
+                  stroke="#e5e7eb"
+                  strokeWidth="1"
+                />
+                <text x={padding.left - 10} y={y + 4} textAnchor="end" fontSize="12" fill="#6b7280">
+                  {tick.toFixed(3)}
+                </text>
+              </g>
+            );
+          })}
+
+          <line
+            x1={padding.left}
+            y1={padding.top}
+            x2={padding.left}
+            y2={height - padding.bottom}
+            stroke="#9ca3af"
+            strokeWidth="1.2"
+          />
+          <line
+            x1={padding.left}
+            y1={height - padding.bottom}
+            x2={width - padding.right}
+            y2={height - padding.bottom}
+            stroke="#9ca3af"
+            strokeWidth="1.2"
+          />
+
+          {cl !== '' && (
+            <g>
               <line
                 x1={padding.left}
-                y1={y}
+                y1={getY(Number(cl))}
                 x2={width - padding.right}
-                y2={y}
-                stroke="#e5e7eb"
-                strokeWidth="1"
+                y2={getY(Number(cl))}
+                stroke="#2563eb"
+                strokeWidth="1.5"
+                strokeDasharray="6 6"
               />
-              <text x={padding.left - 10} y={y + 4} textAnchor="end" fontSize="12" fill="#6b7280">
-                {tick.toFixed(2)}
+              <text
+                x={width - padding.right}
+                y={getY(Number(cl)) - 6}
+                textAnchor="end"
+                fontSize="12"
+                fill="#1d4ed8"
+              >
+                CL {Number(cl).toFixed(3)}
               </text>
             </g>
-          );
-        })}
+          )}
 
-        <line
-          x1={padding.left}
-          y1={padding.top}
-          x2={padding.left}
-          y2={height - padding.bottom}
-          stroke="#9ca3af"
-          strokeWidth="1.2"
-        />
-        <line
-          x1={padding.left}
-          y1={height - padding.bottom}
-          x2={width - padding.right}
-          y2={height - padding.bottom}
-          stroke="#9ca3af"
-          strokeWidth="1.2"
-        />
-
-        {lsl !== '' && (
-          <g>
-            <line
-              x1={padding.left}
-              y1={getY(Number(lsl))}
-              x2={width - padding.right}
-              y2={getY(Number(lsl))}
-              stroke="#f59e0b"
-              strokeWidth="1.5"
-              strokeDasharray="6 6"
-            />
-            <text
-              x={width - padding.right}
-              y={getY(Number(lsl)) - 6}
-              textAnchor="end"
-              fontSize="12"
-              fill="#b45309"
-            >
-              LSL {Number(lsl).toFixed(2)}
-            </text>
-          </g>
-        )}
-
-        {usl !== '' && (
-          <g>
-            <line
-              x1={padding.left}
-              y1={getY(Number(usl))}
-              x2={width - padding.right}
-              y2={getY(Number(usl))}
-              stroke="#dc2626"
-              strokeWidth="1.5"
-              strokeDasharray="6 6"
-            />
-            <text
-              x={width - padding.right}
-              y={getY(Number(usl)) - 6}
-              textAnchor="end"
-              fontSize="12"
-              fill="#b91c1c"
-            >
-              USL {Number(usl).toFixed(2)}
-            </text>
-          </g>
-        )}
-
-        <path d={linePath} fill="none" stroke="#2563eb" strokeWidth="2.5" />
-
-        {data.map((item, index) => {
-          const outOfLimit =
-            (usl !== '' && item.value > Number(usl)) ||
-            (lsl !== '' && item.value < Number(lsl));
-
-          return (
-            <g key={item.id}>
-              <circle
-                cx={getX(index)}
-                cy={getY(item.value)}
-                r="4.5"
-                fill={outOfLimit ? '#dc2626' : '#2563eb'}
+          {ucl !== '' && (
+            <g>
+              <line
+                x1={padding.left}
+                y1={getY(Number(ucl))}
+                x2={width - padding.right}
+                y2={getY(Number(ucl))}
+                stroke="#dc2626"
+                strokeWidth="1.5"
+                strokeDasharray="8 5"
               />
-              <title>{`组别 ${index + 1}\n值: ${item.value}\n时间: ${formatDateTime(item.time)}`}</title>
+              <text
+                x={width - padding.right}
+                y={getY(Number(ucl)) - 6}
+                textAnchor="end"
+                fontSize="12"
+                fill="#b91c1c"
+              >
+                UCL {Number(ucl).toFixed(3)}
+              </text>
             </g>
-          );
-        })}
+          )}
 
-        {data.map((_, index) => {
-          if ((index + 1) % tickStep !== 0 && index !== 0 && index !== data.length - 1) return null;
-          return (
-            <text
-              key={`x-${index}`}
-              x={getX(index)}
-              y={height - padding.bottom + 18}
-              textAnchor="middle"
-              fontSize="12"
-              fill="#6b7280"
-            >
-              {index + 1}
-            </text>
-          );
-        })}
+          {lcl !== '' && (
+            <g>
+              <line
+                x1={padding.left}
+                y1={getY(Number(lcl))}
+                x2={width - padding.right}
+                y2={getY(Number(lcl))}
+                stroke="#f59e0b"
+                strokeWidth="1.5"
+                strokeDasharray="8 5"
+              />
+              <text
+                x={width - padding.right}
+                y={getY(Number(lcl)) - 6}
+                textAnchor="end"
+                fontSize="12"
+                fill="#b45309"
+              >
+                LCL {Number(lcl).toFixed(3)}
+              </text>
+            </g>
+          )}
 
-        <text
-          x={width / 2}
-          y={height - 10}
-          textAnchor="middle"
-          fontSize="13"
-          fill="#374151"
-          fontWeight="600"
-        >
-          组别
-        </text>
+          <path d={pathD} fill="none" stroke={lineColor} strokeWidth="2.5" />
 
-        <text
-          x={18}
-          y={height / 2}
-          textAnchor="middle"
-          fontSize="13"
-          fill="#374151"
-          fontWeight="600"
-          transform={`rotate(-90 18 ${height / 2})`}
-        >
-          测量值
-        </text>
-      </svg>
+          {data.map((item, index) => {
+            const value = item[valueKey];
+            return (
+              <g key={item.id}>
+                <circle
+                  cx={getX(index)}
+                  cy={getY(value)}
+                  r="4.5"
+                  fill={isOut(value) ? '#dc2626' : lineColor}
+                />
+                <title>{`组别 ${index + 1}\n日期: ${formatDate(item.date)}\n值: ${value.toFixed(3)}`}</title>
+              </g>
+            );
+          })}
+
+          {data.map((item, index) => {
+            if ((index + 1) % tickStep !== 0 && index !== 0 && index !== data.length - 1) return null;
+            return (
+              <text
+                key={`x-${item.id}`}
+                x={getX(index)}
+                y={height - padding.bottom + 18}
+                textAnchor="middle"
+                fontSize="12"
+                fill="#6b7280"
+              >
+                {index + 1}
+              </text>
+            );
+          })}
+
+          <text
+            x={width / 2}
+            y={height - 10}
+            textAnchor="middle"
+            fontSize="13"
+            fill="#374151"
+            fontWeight="600"
+          >
+            组别
+          </text>
+
+          <text
+            x={20}
+            y={height / 2}
+            textAnchor="middle"
+            fontSize="13"
+            fill="#374151"
+            fontWeight="600"
+            transform={`rotate(-90 20 ${height / 2})`}
+          >
+            {yLabel}
+          </text>
+        </svg>
+      </div>
     </div>
   );
 }
 
 export default function App() {
-  const [inputValue, setInputValue] = useState('');
+  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [values, setValues] = useState(['', '', '', '', '']);
   const [records, setRecords] = useState([]);
-  const [usl, setUsl] = useState('');
-  const [lsl, setLsl] = useState('');
+  const [limits, setLimits] = useState({
+    xbarUcl: '',
+    xbarCl: '',
+    xbarLcl: '',
+    rUcl: '',
+    rCl: '',
+    rLcl: '',
+  });
   const [message, setMessage] = useState('');
 
   useEffect(() => {
     try {
       const savedRecords = localStorage.getItem(STORAGE_KEY);
-      const savedSettings = localStorage.getItem(SETTINGS_KEY);
-
+      const savedLimits = localStorage.getItem(LIMITS_KEY);
       if (savedRecords) {
         const parsed = JSON.parse(savedRecords);
-        if (Array.isArray(parsed)) {
-          setRecords(parsed);
-        }
+        if (Array.isArray(parsed)) setRecords(parsed);
       }
-
-      if (savedSettings) {
-        const parsedSettings = JSON.parse(savedSettings);
-        setUsl(parsedSettings.usl ?? '');
-        setLsl(parsedSettings.lsl ?? '');
+      if (savedLimits) {
+        const parsedLimits = JSON.parse(savedLimits);
+        setLimits((prev) => ({ ...prev, ...parsedLimits }));
       }
     } catch (error) {
       console.error('读取本地数据失败：', error);
@@ -287,110 +312,123 @@ export default function App() {
   }, [records]);
 
   useEffect(() => {
-    localStorage.setItem(
-      SETTINGS_KEY,
-      JSON.stringify({
-        usl,
-        lsl,
-      })
-    );
-  }, [usl, lsl]);
+    localStorage.setItem(LIMITS_KEY, JSON.stringify(limits));
+  }, [limits]);
 
-  const stats = useMemo(() => calculateStats(records.map((item) => item.value)), [records]);
+  const overallStats = useMemo(() => calcOverallStats(records), [records]);
 
-  const alarmCount = useMemo(() => {
+  const abnormalCount = useMemo(() => {
     return records.filter((item) => {
-      if (usl !== '' && item.value > Number(usl)) return true;
-      if (lsl !== '' && item.value < Number(lsl)) return true;
-      return false;
+      const xOut =
+        (limits.xbarUcl !== '' && item.mean > Number(limits.xbarUcl)) ||
+        (limits.xbarLcl !== '' && item.mean < Number(limits.xbarLcl));
+      const rOut =
+        (limits.rUcl !== '' && item.range > Number(limits.rUcl)) ||
+        (limits.rLcl !== '' && item.range < Number(limits.rLcl));
+      return xOut || rOut;
     }).length;
-  }, [records, usl, lsl]);
+  }, [records, limits]);
 
-  const latestAlarm = useMemo(() => {
+  const latestWarning = useMemo(() => {
     if (!records.length) return '';
-
     const latest = records[records.length - 1];
-    if (usl !== '' && latest.value > Number(usl)) {
-      return `最新一组超上限：${latest.value} > ${usl}`;
-    }
-    if (lsl !== '' && latest.value < Number(lsl)) {
-      return `最新一组超下限：${latest.value} < ${lsl}`;
-    }
-    return '';
-  }, [records, usl, lsl]);
+    const warnings = [];
 
-  const handleAddRecord = () => {
-    const numericValue = Number(inputValue);
+    if (limits.xbarUcl !== '' && latest.mean > Number(limits.xbarUcl)) {
+      warnings.push(`X-bar 超上限`);
+    }
+    if (limits.xbarLcl !== '' && latest.mean < Number(limits.xbarLcl)) {
+      warnings.push(`X-bar 低于下限`);
+    }
+    if (limits.rUcl !== '' && latest.range > Number(limits.rUcl)) {
+      warnings.push(`R 超上限`);
+    }
+    if (limits.rLcl !== '' && latest.range < Number(limits.rLcl)) {
+      warnings.push(`R 低于下限`);
+    }
 
-    if (inputValue === '' || Number.isNaN(numericValue)) {
-      setMessage('请输入有效数字');
+    return warnings.length ? `最新组异常：${warnings.join('，')}` : '';
+  }, [records, limits]);
+
+  const handleValueChange = (index, nextValue) => {
+    setValues((prev) => prev.map((item, i) => (i === index ? nextValue : item)));
+  };
+
+  const resetInputs = () => {
+    setValues(['', '', '', '', '']);
+  };
+
+  const handleAddGroup = () => {
+    const numbers = values.map(toNumber);
+    if (!date) {
+      setMessage('请选择日期');
+      return;
+    }
+    if (numbers.some((item) => item === null)) {
+      setMessage('请完整输入 5 个有效数字');
       return;
     }
 
+    const { mean, range } = calcGroupStats(numbers);
     const newRecord = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      value: numericValue,
-      time: new Date().toISOString(),
+      date,
+      values: numbers,
+      mean,
+      range,
     };
 
     setRecords((prev) => [...prev, newRecord]);
-    setInputValue('');
-
-    if (usl !== '' && numericValue > Number(usl)) {
-      setMessage(`已记录。当前值 ${numericValue} 超过上限 ${usl}`);
-      return;
-    }
-
-    if (lsl !== '' && numericValue < Number(lsl)) {
-      setMessage(`已记录。当前值 ${numericValue} 低于下限 ${lsl}`);
-      return;
-    }
-
-    setMessage('记录成功');
+    resetInputs();
+    setMessage(`第 ${records.length + 1} 组已添加成功`);
   };
 
-  const handleDeleteRecord = (id) => {
+  const handleDeleteGroup = (id) => {
     setRecords((prev) => prev.filter((item) => item.id !== id));
-    setMessage('已删除该条记录');
+    setMessage('该组数据已删除');
   };
 
   const handleClearAll = () => {
-    const confirmed = window.confirm('确定清空全部记录吗？此操作不可恢复。');
+    const confirmed = window.confirm('确定清空全部分组数据吗？此操作不可恢复。');
     if (!confirmed) return;
-
     setRecords([]);
-    setMessage('全部记录已清空');
+    setMessage('全部分组数据已清空');
   };
 
   const handleExportCSV = () => {
-    const headers = ['组别', '时间', '测量值', '状态'];
+    const headers = ['组别', '日期', '数据1', '数据2', '数据3', '数据4', '数据5', 'X-bar', 'R', '状态'];
     const rows = records.map((item, index) => {
-      const status =
-        (usl !== '' && item.value > Number(usl)) || (lsl !== '' && item.value < Number(lsl))
-          ? '超限'
-          : '正常';
-      return [index + 1, formatDateTime(item.time), item.value, status];
+      const abnormal =
+        (limits.xbarUcl !== '' && item.mean > Number(limits.xbarUcl)) ||
+        (limits.xbarLcl !== '' && item.mean < Number(limits.xbarLcl)) ||
+        (limits.rUcl !== '' && item.range > Number(limits.rUcl)) ||
+        (limits.rLcl !== '' && item.range < Number(limits.rLcl));
+
+      return [
+        index + 1,
+        formatDate(item.date),
+        item.values[0],
+        item.values[1],
+        item.values[2],
+        item.values[3],
+        item.values[4],
+        item.mean.toFixed(3),
+        item.range.toFixed(3),
+        abnormal ? '异常' : '正常',
+      ];
     });
 
     const csvContent = [headers, ...rows]
       .map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(','))
       .join('\n');
 
-    downloadFile(`spc-records-${Date.now()}.csv`, `\ufeff${csvContent}`, 'text/csv;charset=utf-8;');
+    downloadFile(`spc-xbar-r-${Date.now()}.csv`, `\ufeff${csvContent}`, 'text/csv;charset=utf-8;');
     setMessage('CSV 已导出');
   };
 
   const handleExportJSON = () => {
-    const content = JSON.stringify(
-      {
-        settings: { usl, lsl },
-        records,
-      },
-      null,
-      2
-    );
-
-    downloadFile(`spc-records-${Date.now()}.json`, content, 'application/json;charset=utf-8;');
+    const content = JSON.stringify({ records, limits }, null, 2);
+    downloadFile(`spc-xbar-r-${Date.now()}.json`, content, 'application/json;charset=utf-8;');
     setMessage('JSON 已导出');
   };
 
@@ -403,27 +441,24 @@ export default function App() {
       try {
         const parsed = JSON.parse(reader.result);
         const importedRecords = Array.isArray(parsed.records) ? parsed.records : [];
-
         setRecords(
           importedRecords.map((item, index) => ({
             id: item.id || `${Date.now()}-${index}`,
-            value: Number(item.value),
-            time: item.time || new Date().toISOString(),
+            date: item.date || new Date().toISOString().slice(0, 10),
+            values: Array.isArray(item.values) ? item.values.map(Number).slice(0, 5) : [0, 0, 0, 0, 0],
+            mean: Number(item.mean),
+            range: Number(item.range),
           }))
         );
-
-        if (parsed.settings) {
-          setUsl(parsed.settings.usl ?? '');
-          setLsl(parsed.settings.lsl ?? '');
+        if (parsed.limits) {
+          setLimits((prev) => ({ ...prev, ...parsed.limits }));
         }
-
         setMessage('JSON 导入成功');
       } catch (error) {
         console.error(error);
         setMessage('导入失败，请确认 JSON 文件格式正确');
       }
     };
-
     reader.readAsText(file);
     event.target.value = '';
   };
@@ -433,116 +468,182 @@ export default function App() {
       <div style={styles.container}>
         <div style={styles.headerRow}>
           <div>
-            <h1 style={styles.title}>SPC 监控面板</h1>
-            <p style={styles.subtitle}>图表横坐标已改为组别，数据明细保留时间记录</p>
+            <h1 style={styles.title}>SPC X-bar / R 监控面板</h1>
+            <p style={styles.subtitle}>每天录入 5 个数据，自动计算 X-bar 和 R；控制限由你手动输入</p>
           </div>
         </div>
 
         <div style={styles.card}>
-          <div style={styles.grid2}>
+          <h2 style={styles.sectionTitle}>分组录入</h2>
+          <div style={styles.formGrid}>
             <div>
-              <label style={styles.label}>录入测量值</label>
-              <div style={styles.inputRow}>
-                <input
-                  type="number"
-                  step="any"
-                  value={inputValue}
-                  onChange={(e) => setInputValue(e.target.value)}
-                  placeholder="请输入测量值"
-                  style={styles.input}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') handleAddRecord();
-                  }}
-                />
-                <button onClick={handleAddRecord} style={styles.primaryButton}>
-                  添加记录
-                </button>
-              </div>
+              <label style={styles.label}>日期</label>
+              <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={styles.input} />
             </div>
-
-            <div style={styles.limitGrid}>
-              <div>
-                <label style={styles.label}>上限 USL</label>
+            {[0, 1, 2, 3, 4].map((index) => (
+              <div key={index}>
+                <label style={styles.label}>{`数据${index + 1}`}</label>
                 <input
                   type="number"
                   step="any"
-                  value={usl}
-                  onChange={(e) => setUsl(e.target.value)}
-                  placeholder="可选"
+                  value={values[index]}
+                  onChange={(e) => handleValueChange(index, e.target.value)}
+                  placeholder={`请输入第 ${index + 1} 个值`}
                   style={styles.input}
                 />
               </div>
-              <div>
-                <label style={styles.label}>下限 LSL</label>
-                <input
-                  type="number"
-                  step="any"
-                  value={lsl}
-                  onChange={(e) => setLsl(e.target.value)}
-                  placeholder="可选"
-                  style={styles.input}
-                />
-              </div>
-            </div>
+            ))}
           </div>
 
           <div style={styles.toolbar}>
-            <button onClick={handleExportCSV} style={styles.secondaryButton}>
-              导出 CSV
-            </button>
-            <button onClick={handleExportJSON} style={styles.secondaryButton}>
-              导出 JSON
-            </button>
+            <button onClick={handleAddGroup} style={styles.primaryButton}>添加本组</button>
+            <button onClick={handleExportCSV} style={styles.secondaryButton}>导出 CSV</button>
+            <button onClick={handleExportJSON} style={styles.secondaryButton}>导出 JSON</button>
             <label style={styles.uploadButton}>
               导入 JSON
               <input type="file" accept="application/json" onChange={handleImportJSON} hidden />
             </label>
-            <button onClick={handleClearAll} style={styles.dangerButton}>
-              清空全部
-            </button>
+            <button onClick={handleClearAll} style={styles.dangerButton}>清空全部</button>
           </div>
 
           {message ? <div style={styles.message}>{message}</div> : null}
-          {latestAlarm ? <div style={styles.alarm}>{latestAlarm}</div> : null}
+          {latestWarning ? <div style={styles.alarm}>{latestWarning}</div> : null}
+        </div>
+
+        <div style={styles.card}>
+          <h2 style={styles.sectionTitle}>控制限设置（手动输入）</h2>
+          <div style={styles.limitSectionTitle}>X-bar 图</div>
+          <div style={styles.limitGrid}>
+            <div>
+              <label style={styles.label}>UCL</label>
+              <input
+                type="number"
+                step="any"
+                value={limits.xbarUcl}
+                onChange={(e) => setLimits((prev) => ({ ...prev, xbarUcl: e.target.value }))}
+                style={styles.input}
+              />
+            </div>
+            <div>
+              <label style={styles.label}>CL</label>
+              <input
+                type="number"
+                step="any"
+                value={limits.xbarCl}
+                onChange={(e) => setLimits((prev) => ({ ...prev, xbarCl: e.target.value }))}
+                style={styles.input}
+              />
+            </div>
+            <div>
+              <label style={styles.label}>LCL</label>
+              <input
+                type="number"
+                step="any"
+                value={limits.xbarLcl}
+                onChange={(e) => setLimits((prev) => ({ ...prev, xbarLcl: e.target.value }))}
+                style={styles.input}
+              />
+            </div>
+          </div>
+
+          <div style={{ ...styles.limitSectionTitle, marginTop: 18 }}>R 图</div>
+          <div style={styles.limitGrid}>
+            <div>
+              <label style={styles.label}>UCL</label>
+              <input
+                type="number"
+                step="any"
+                value={limits.rUcl}
+                onChange={(e) => setLimits((prev) => ({ ...prev, rUcl: e.target.value }))}
+                style={styles.input}
+              />
+            </div>
+            <div>
+              <label style={styles.label}>CL</label>
+              <input
+                type="number"
+                step="any"
+                value={limits.rCl}
+                onChange={(e) => setLimits((prev) => ({ ...prev, rCl: e.target.value }))}
+                style={styles.input}
+              />
+            </div>
+            <div>
+              <label style={styles.label}>LCL</label>
+              <input
+                type="number"
+                step="any"
+                value={limits.rLcl}
+                onChange={(e) => setLimits((prev) => ({ ...prev, rLcl: e.target.value }))}
+                style={styles.input}
+              />
+            </div>
+          </div>
         </div>
 
         <div style={styles.statsGrid}>
           <div style={styles.statCard}>
             <div style={styles.statLabel}>总组数</div>
-            <div style={styles.statValue}>{stats.count}</div>
+            <div style={styles.statValue}>{overallStats.totalGroups}</div>
           </div>
           <div style={styles.statCard}>
-            <div style={styles.statLabel}>平均值</div>
-            <div style={styles.statValue}>{stats.mean.toFixed(3)}</div>
+            <div style={styles.statLabel}>X-double-bar</div>
+            <div style={styles.statValue}>{overallStats.xDoubleBar.toFixed(3)}</div>
           </div>
           <div style={styles.statCard}>
-            <div style={styles.statLabel}>标准差</div>
-            <div style={styles.statValue}>{stats.std.toFixed(3)}</div>
+            <div style={styles.statLabel}>R-bar</div>
+            <div style={styles.statValue}>{overallStats.rBar.toFixed(3)}</div>
           </div>
           <div style={styles.statCard}>
-            <div style={styles.statLabel}>超限组数</div>
-            <div style={styles.statValue}>{alarmCount}</div>
+            <div style={styles.statLabel}>异常组数</div>
+            <div style={styles.statValue}>{abnormalCount}</div>
           </div>
         </div>
 
         <div style={styles.card}>
-          <h2 style={styles.sectionTitle}>趋势图</h2>
-          <SimpleLineChart data={records} usl={usl} lsl={lsl} />
+          <ControlChart
+            title="X-bar 控制图"
+            yLabel="组均值 X-bar"
+            data={records}
+            cl={limits.xbarCl}
+            ucl={limits.xbarUcl}
+            lcl={limits.xbarLcl}
+            valueKey="mean"
+            lineColor="#2563eb"
+          />
+        </div>
+
+        <div style={styles.card}>
+          <ControlChart
+            title="R 控制图"
+            yLabel="极差 R"
+            data={records}
+            cl={limits.rCl}
+            ucl={limits.rUcl}
+            lcl={limits.rLcl}
+            valueKey="range"
+            lineColor="#7c3aed"
+          />
         </div>
 
         <div style={styles.card}>
           <div style={styles.tableHeader}>
-            <h2 style={styles.sectionTitle}>数据明细</h2>
-            <div style={styles.smallTip}>图表看组别，明细保留时间</div>
+            <h2 style={styles.sectionTitle}>分组明细</h2>
+            <div style={styles.smallTip}>每行代表 1 天，每组固定 5 个数据</div>
           </div>
-
           <div style={styles.tableWrap}>
             <table style={styles.table}>
               <thead>
                 <tr>
                   <th style={styles.th}>组别</th>
-                  <th style={styles.th}>时间</th>
-                  <th style={styles.th}>测量值</th>
+                  <th style={styles.th}>日期</th>
+                  <th style={styles.th}>数据1</th>
+                  <th style={styles.th}>数据2</th>
+                  <th style={styles.th}>数据3</th>
+                  <th style={styles.th}>数据4</th>
+                  <th style={styles.th}>数据5</th>
+                  <th style={styles.th}>X-bar</th>
+                  <th style={styles.th}>R</th>
                   <th style={styles.th}>状态</th>
                   <th style={styles.th}>操作</th>
                 </tr>
@@ -550,35 +651,34 @@ export default function App() {
               <tbody>
                 {records.length === 0 ? (
                   <tr>
-                    <td colSpan="5" style={styles.emptyCell}>
-                      暂无记录
-                    </td>
+                    <td colSpan="11" style={styles.emptyCell}>暂无记录</td>
                   </tr>
                 ) : (
                   records.map((item, index) => {
-                    const outOfLimit =
-                      (usl !== '' && item.value > Number(usl)) ||
-                      (lsl !== '' && item.value < Number(lsl));
+                    const abnormal =
+                      (limits.xbarUcl !== '' && item.mean > Number(limits.xbarUcl)) ||
+                      (limits.xbarLcl !== '' && item.mean < Number(limits.xbarLcl)) ||
+                      (limits.rUcl !== '' && item.range > Number(limits.rUcl)) ||
+                      (limits.rLcl !== '' && item.range < Number(limits.rLcl));
 
                     return (
                       <tr key={item.id}>
                         <td style={styles.td}>{index + 1}</td>
-                        <td style={styles.td}>{formatDateTime(item.time)}</td>
-                        <td style={styles.td}>{item.value}</td>
+                        <td style={styles.td}>{formatDate(item.date)}</td>
+                        <td style={styles.td}>{item.values[0]}</td>
+                        <td style={styles.td}>{item.values[1]}</td>
+                        <td style={styles.td}>{item.values[2]}</td>
+                        <td style={styles.td}>{item.values[3]}</td>
+                        <td style={styles.td}>{item.values[4]}</td>
+                        <td style={styles.td}>{item.mean.toFixed(3)}</td>
+                        <td style={styles.td}>{item.range.toFixed(3)}</td>
                         <td style={styles.td}>
-                          <span
-                            style={{
-                              ...styles.badge,
-                              ...(outOfLimit ? styles.badgeAlarm : styles.badgeNormal),
-                            }}
-                          >
-                            {outOfLimit ? '超限' : '正常'}
+                          <span style={{ ...styles.badge, ...(abnormal ? styles.badgeAlarm : styles.badgeNormal) }}>
+                            {abnormal ? '异常' : '正常'}
                           </span>
                         </td>
                         <td style={styles.td}>
-                          <button onClick={() => handleDeleteRecord(item.id)} style={styles.linkButton}>
-                            删除
-                          </button>
+                          <button onClick={() => handleDeleteGroup(item.id)} style={styles.linkButton}>删除</button>
                         </td>
                       </tr>
                     );
@@ -604,7 +704,7 @@ const styles = {
     color: '#111827',
   },
   container: {
-    maxWidth: '1180px',
+    maxWidth: '1240px',
     margin: '0 auto',
   },
   headerRow: {
@@ -630,20 +730,27 @@ const styles = {
     boxShadow: '0 10px 30px rgba(15, 23, 42, 0.06)',
     marginBottom: '18px',
   },
-  grid2: {
-    display: 'grid',
-    gridTemplateColumns: '1.4fr 1fr',
-    gap: '16px',
+  sectionTitle: {
+    margin: '0 0 14px',
+    fontSize: '20px',
+    fontWeight: 800,
+    color: '#111827',
   },
-  inputRow: {
-    display: 'flex',
-    gap: '10px',
-    alignItems: 'center',
+  formGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(6, 1fr)',
+    gap: '12px',
   },
   limitGrid: {
     display: 'grid',
-    gridTemplateColumns: '1fr 1fr',
+    gridTemplateColumns: 'repeat(3, 1fr)',
     gap: '12px',
+  },
+  limitSectionTitle: {
+    fontSize: '15px',
+    fontWeight: 700,
+    color: '#374151',
+    marginBottom: '10px',
   },
   label: {
     display: 'block',
@@ -661,23 +768,28 @@ const styles = {
     fontSize: '14px',
     outline: 'none',
   },
+  toolbar: {
+    display: 'flex',
+    gap: '10px',
+    flexWrap: 'wrap',
+    marginTop: '16px',
+  },
   primaryButton: {
     border: 'none',
     background: '#2563eb',
     color: '#ffffff',
     borderRadius: '12px',
-    padding: '12px 18px',
+    padding: '11px 16px',
     fontSize: '14px',
     fontWeight: 700,
     cursor: 'pointer',
-    whiteSpace: 'nowrap',
   },
   secondaryButton: {
     border: '1px solid #d1d5db',
     background: '#ffffff',
     color: '#111827',
     borderRadius: '12px',
-    padding: '10px 14px',
+    padding: '11px 16px',
     fontSize: '14px',
     fontWeight: 600,
     cursor: 'pointer',
@@ -687,7 +799,7 @@ const styles = {
     background: '#ffffff',
     color: '#111827',
     borderRadius: '12px',
-    padding: '10px 14px',
+    padding: '11px 16px',
     fontSize: '14px',
     fontWeight: 600,
     cursor: 'pointer',
@@ -699,16 +811,10 @@ const styles = {
     background: '#dc2626',
     color: '#ffffff',
     borderRadius: '12px',
-    padding: '10px 14px',
+    padding: '11px 16px',
     fontSize: '14px',
     fontWeight: 700,
     cursor: 'pointer',
-  },
-  toolbar: {
-    display: 'flex',
-    gap: '10px',
-    flexWrap: 'wrap',
-    marginTop: '16px',
   },
   message: {
     marginTop: '14px',
@@ -750,14 +856,16 @@ const styles = {
     fontWeight: 800,
     color: '#111827',
   },
-  sectionTitle: {
-    margin: 0,
-    fontSize: '20px',
+  chartCard: {
+    width: '100%',
+  },
+  chartTitle: {
+    margin: '0 0 12px',
+    fontSize: '18px',
     fontWeight: 800,
     color: '#111827',
   },
   chartWrap: {
-    marginTop: '14px',
     width: '100%',
     overflowX: 'auto',
     border: '1px solid #e5e7eb',
@@ -798,7 +906,7 @@ const styles = {
   table: {
     width: '100%',
     borderCollapse: 'collapse',
-    minWidth: '760px',
+    minWidth: '1200px',
   },
   th: {
     background: '#f9fafb',
